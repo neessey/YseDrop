@@ -1,0 +1,6 @@
+{
+  "name": "YseDrop",
+  "description": "A modern cross-platform file transfer application for instant sharing between devices.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

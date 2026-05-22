@@ -1,0 +1,76 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isVerified() { return isSignedIn() && request.auth.token.email_verified == true; }
+
+    // --- User Rules ---
+    function isValidUser(data) {
+      return data.uid is string && data.uid == request.auth.uid &&
+             data.email is string && data.email.size() <= 256 &&
+             (data.displayName == null || data.displayName is string) &&
+             (data.photoURL == null || data.photoURL is string);
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(incoming()) && incoming().keys().hasAll(['uid', 'email']) && incoming().keys().size() >= 2;
+      allow update: if isOwner(userId) && isValidUser(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL']);
+    }
+
+    // --- Device Rules ---
+    function isValidDevice(data) {
+      return data.id is string && isValidId(data.id) &&
+             data.name is string && data.name.size() <= 64 &&
+             data.type in ['mobile', 'desktop'] &&
+             data.ownerId == request.auth.uid &&
+             (data.pairingCode == null || (data.pairingCode is string && data.pairingCode.size() <= 10));
+    }
+
+    match /devices/{deviceId} {
+      allow list: if isSignedIn();
+      allow get: if isSignedIn(); // Allow discovery
+      allow create: if isSignedIn() && isValidDevice(incoming()) && incoming().id == deviceId;
+      allow update: if isSignedIn() && (
+        // Owner can update everything valid
+        (isOwner(existing().ownerId) && isValidDevice(incoming())) ||
+        // Others can only update heartbeat/presence fields if necessary, 
+        // but for YseDrop we only allow owner updates for simplicity
+        (isSignedIn() && incoming().diff(existing()).affectedKeys().hasOnly(['lastSeen', 'isOnline']))
+      );
+      allow delete: if isSignedIn() && isOwner(existing().ownerId);
+    }
+
+    // --- Transfer Rules ---
+    function isValidTransfer(data) {
+      return data.id is string && isValidId(data.id) &&
+             data.senderId is string && data.receiverId is string &&
+             data.fileInfo is map && data.fileInfo.name is string &&
+             data.status in ['pending', 'transferring', 'completed', 'failed'] &&
+             data.createdAt == request.time;
+    }
+
+    match /transfers/{transferId} {
+      allow list: if isSignedIn() && (resource.data.senderId == request.auth.uid || resource.data.receiverId == request.auth.uid);
+      allow get: if isSignedIn() && (resource.data.senderId == request.auth.uid || resource.data.receiverId == request.auth.uid);
+      allow create: if isSignedIn() && isValidTransfer(incoming()) && incoming().senderId == request.auth.uid;
+      allow update: if isSignedIn() && (
+        (existing().senderId == request.auth.uid || existing().receiverId == request.auth.uid) &&
+        incoming().diff(existing()).affectedKeys().hasAny(['status', 'progress', 'updatedAt']) &&
+        incoming().updatedAt == request.time
+      );
+    }
+  }
+}

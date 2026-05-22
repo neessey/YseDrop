@@ -1,0 +1,69 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Device": {
+      "title": "Device",
+      "description": "Information about a registered device",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "type": { "type": "string", "enum": ["mobile", "desktop"] },
+        "ownerId": { "type": "string" },
+        "lastSeen": { "type": "string", "format": "date-time" },
+        "isOnline": { "type": "boolean" },
+        "pairingCode": { "type": "string" }
+      },
+      "required": ["id", "name", "type", "ownerId"]
+    },
+    "Transfer": {
+      "title": "Transfer",
+      "description": "Record of a file transfer task",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "senderId": { "type": "string" },
+        "receiverId": { "type": "string" },
+        "fileInfo": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "size": { "type": "number" },
+            "type": { "type": "string" }
+          }
+        },
+        "status": { "type": "string", "enum": ["pending", "transferring", "completed", "failed"] },
+        "progress": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "senderId", "receiverId", "fileInfo", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/devices/{deviceId}": {
+      "schema": "Device",
+      "description": "Registered devices"
+    },
+    "/transfers/{transferId}": {
+      "schema": "Transfer",
+      "description": "File transfer records"
+    }
+  }
+}
