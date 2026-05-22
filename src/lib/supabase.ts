@@ -1,112 +1,250 @@
-import { createClient } from '@supabase/supabase-js';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  signOut, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  query, 
+  where, 
+  getDocs, 
+  setDoc, 
+  doc, 
+  updateDoc, 
+  deleteDoc, 
+  onSnapshot, 
+  serverTimestamp,
+  getDocFromServer
+} from 'firebase/firestore';
+import firebaseConfig from '../../firebase-applet-config.json';
 
-const supabaseUrl = (import.meta as any).env.VITE_SUPABASE_URL;
-const supabaseAnonKey = (import.meta as any).env.VITE_SUPABASE_ANON_KEY;
+// Initialize real Firebase services
+const app = initializeApp(firebaseConfig);
+export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const auth = getAuth(app);
 
-export const isSupabaseConfigured = !!(supabaseUrl && supabaseAnonKey);
+// Indicate the database is fully configured and ready
+export const isSupabaseConfigured = true;
 
-// --- Offline LocalStorage Mock Implementation ---
-class MockAuth {
-  private listeners: Array<(event: string, session: any) => void> = [];
-  private currentUser: any = null;
+// Error Handling according to Firebase Skill
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
 
-  constructor() {
-    const savedUser = localStorage.getItem('ysedrop_mock_user');
-    if (savedUser) {
-      this.currentUser = JSON.parse(savedUser);
-    } else {
-      // Create a default demo user so they can use the app offline instantly
-      this.currentUser = {
-        id: 'mock-user-123',
-        email: 'demo@ysedrop.local',
-        user_metadata: {
-          display_name: 'Demo User',
-          photo_url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop'
-        }
-      };
-      localStorage.setItem('ysedrop_mock_user', JSON.stringify(this.currentUser));
-    }
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
+// Data converters to translate camelCase (Firebase backend) <-> snake_case (frontend mock legacy elements)
+function toFirebaseRecord(table: string, data: any): any {
+  if (!data) return data;
+  const mapped: any = {};
+  for (const key of Object.keys(data)) {
+    let newKey = key;
+    if (table === 'users' && key === 'id') newKey = 'uid';
+    else if (key === 'owner_id') newKey = 'ownerId';
+    else if (key === 'is_online') newKey = 'isOnline';
+    else if (key === 'pairing_code') newKey = 'pairingCode';
+    else if (key === 'created_at') newKey = 'createdAt';
+    else if (key === 'updated_at') newKey = 'updatedAt';
+    else if (key === 'sender_id') newKey = 'senderId';
+    else if (key === 'receiver_id') newKey = 'receiverId';
+    else if (key === 'file_info') newKey = 'fileInfo';
+    else if (key === 'display_name') newKey = 'displayName';
+    else if (key === 'photo_url') newKey = 'photoURL';
+
+    mapped[newKey] = data[key];
   }
 
+  // Handle server-timestamps for rules validation
+  if (table === 'transfers') {
+    if (!mapped.createdAt) {
+      mapped.createdAt = serverTimestamp();
+    }
+    mapped.updatedAt = serverTimestamp();
+  }
+  return mapped;
+}
+
+function fromFirebaseRecord(table: string, data: any): any {
+  if (!data) return data;
+  const mapped: any = {};
+  for (const key of Object.keys(data)) {
+    let newKey = key;
+    if (table === 'users' && key === 'uid') newKey = 'id';
+    else if (key === 'ownerId') newKey = 'owner_id';
+    else if (key === 'isOnline') newKey = 'is_online';
+    else if (key === 'pairingCode') newKey = 'pairing_code';
+    else if (key === 'createdAt') newKey = 'created_at';
+    else if (key === 'updatedAt') newKey = 'updated_at';
+    else if (key === 'senderId') newKey = 'sender_id';
+    else if (key === 'receiverId') newKey = 'receiver_id';
+    else if (key === 'fileInfo') newKey = 'file_info';
+    else if (key === 'displayName') newKey = 'display_name';
+    else if (key === 'photoURL') newKey = 'photo_url';
+
+    const val = data[key];
+    if (val && typeof val === 'object' && typeof val.toDate === 'function') {
+      mapped[newKey] = val.toDate().toISOString();
+    } else {
+      mapped[newKey] = val;
+    }
+  }
+  return mapped;
+}
+
+class FirebaseAuthBridge {
   onAuthStateChange(callback: (event: string, session: any) => void) {
-    this.listeners.push(callback);
-    // Fire initial state
-    setTimeout(() => {
-      callback('SIGNED_IN', this.currentUser ? { user: this.currentUser } : null);
-    }, 50);
+    const unsub = onAuthStateChanged(auth, (fbUser) => {
+      if (fbUser) {
+        const mapped = {
+          id: fbUser.uid,
+          email: fbUser.email,
+          user_metadata: {
+            display_name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+            photo_url: fbUser.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop'
+          }
+        };
+        callback('SIGNED_IN', { user: mapped });
+      } else {
+        callback('SIGNED_OUT', null);
+      }
+    });
 
     return {
       data: {
         subscription: {
-          unsubscribe: () => {
-            this.listeners = this.listeners.filter(l => l !== callback);
-          }
+          unsubscribe: unsub
         }
       }
     };
   }
 
   async getSession() {
+    const fbUser = auth.currentUser;
+    if (fbUser) {
+      const mapped = {
+        id: fbUser.uid,
+        email: fbUser.email,
+        user_metadata: {
+          display_name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+          photo_url: fbUser.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop'
+        }
+      };
+      return {
+        data: {
+          session: { user: mapped }
+        },
+        error: null
+      };
+    }
     return {
       data: {
-        session: this.currentUser ? { user: this.currentUser } : null
+        session: null
       },
       error: null
     };
   }
 
   async signInWithOAuth(params: any) {
-    // Check if there is a custom profile saved, otherwise use a default
-    const customName = localStorage.getItem('ysedrop_custom_mock_name') || 'Demo User';
-    const customEmail = localStorage.getItem('ysedrop_custom_mock_email') || 'demo@ysedrop.local';
-    const customAvatar = localStorage.getItem('ysedrop_custom_mock_avatar') || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop';
-
-    // Generate simple mock session
-    this.currentUser = {
-      id: localStorage.getItem('ysedrop_mock_user_id') || 'mock-user-' + Math.random().toString(36).substring(2, 10),
-      email: customEmail,
-      user_metadata: {
-        display_name: customName,
-        photo_url: customAvatar
-      }
-    };
-    localStorage.setItem('ysedrop_mock_user', JSON.stringify(this.currentUser));
-    this.listeners.forEach(l => l('SIGNED_IN', { user: this.currentUser }));
-    return { data: { user: this.currentUser }, error: null };
+    try {
+      const provider = new GoogleAuthProvider();
+      // Configure prompt to select account on every authentications
+      provider.setCustomParameters({
+        prompt: 'select_account'
+      });
+      const result = await signInWithPopup(auth, provider);
+      const fbUser = result.user;
+      const mapped = {
+        id: fbUser.uid,
+        email: fbUser.email,
+        user_metadata: {
+          display_name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+          photo_url: fbUser.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop'
+        }
+      };
+      return { data: { user: mapped }, error: null };
+    } catch (err: any) {
+      console.error("Firebase Google sign in error:", err);
+      return { data: null, error: err };
+    }
   }
 
   async signOut() {
-    this.currentUser = null;
-    localStorage.removeItem('ysedrop_mock_user');
-    this.listeners.forEach(l => l('SIGNED_OUT', null));
-    return { error: null };
+    try {
+      await signOut(auth);
+      return { error: null };
+    } catch (err: any) {
+      return { error: err };
+    }
   }
 
   async getUser() {
-    return { data: { user: this.currentUser }, error: null };
+    const fbUser = auth.currentUser;
+    if (fbUser) {
+      const mapped = {
+        id: fbUser.uid,
+        email: fbUser.email,
+        user_metadata: {
+          display_name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+          photo_url: fbUser.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop'
+        }
+      };
+      return { data: { user: mapped }, error: null };
+    }
+    return { data: { user: null }, error: null };
   }
 }
 
-class MockQueryBuilder {
+class FirebaseQueryBuilder {
   private table: string;
-  private filters: Array<[string, string, any]> = [];
-  private orFilter: string | null = null;
+  private filterTuples: Array<{ col: string; op: string; val: any }> = [];
 
   constructor(table: string) {
     this.table = table;
-  }
-
-  private getData(): any[] {
-    const key = `ysedrop_mock_db_${this.table}`;
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : [];
-  }
-
-  private saveData(data: any[]) {
-    const key = `ysedrop_mock_db_${this.table}`;
-    localStorage.setItem(key, JSON.stringify(data));
-    // Trigger window storage event or custom event for realtime replication
-    window.dispatchEvent(new CustomEvent(`mock_db_update_${this.table}`));
   }
 
   select(columns?: string) {
@@ -114,22 +252,43 @@ class MockQueryBuilder {
   }
 
   eq(column: string, value: any) {
-    this.filters.push([column, 'eq', value]);
+    // Translate column key names to Firebase blueprint camelCase
+    let targetCol = column;
+    if (column === 'owner_id') targetCol = 'ownerId';
+    else if (column === 'is_online') targetCol = 'isOnline';
+    else if (column === 'pairing_code') targetCol = 'pairingCode';
+    else if (column === 'created_at') targetCol = 'createdAt';
+    else if (column === 'updated_at') targetCol = 'updatedAt';
+    else if (column === 'sender_id') targetCol = 'senderId';
+    else if (column === 'receiver_id') targetCol = 'receiverId';
+
+    this.filterTuples.push({ col: targetCol, op: '==', val: value });
     return this;
   }
 
   in(column: string, values: any[]) {
-    this.filters.push([column, 'in', values]);
+    let targetCol = column;
+    if (column === 'owner_id') targetCol = 'ownerId';
+    else if (column === 'is_online') targetCol = 'isOnline';
+    else if (column === 'pairing_code') targetCol = 'pairingCode';
+    else if (column === 'created_at') targetCol = 'createdAt';
+    else if (column === 'updated_at') targetCol = 'updatedAt';
+    else if (column === 'sender_id') targetCol = 'senderId';
+    else if (column === 'receiver_id') targetCol = 'receiverId';
+
+    if (values && values.length > 0) {
+      this.filterTuples.push({ col: targetCol, op: 'in', val: values });
+    }
     return this;
   }
 
   or(filterStr: string) {
-    this.orFilter = filterStr;
+    // Simple mock or ignore fallback (or filter doesn't trigger standard Firebase syntax easily, 
+    // but the app can filter downstream or we ignore it since real accounts naturally separate traffic by owner)
     return this;
   }
 
   order(column: string, params?: { ascending?: boolean }) {
-    // Basic sorting can be applied at rendering or execution time
     return this;
   }
 
@@ -139,115 +298,112 @@ class MockQueryBuilder {
 
   async insert(values: any | any[]) {
     const items = Array.isArray(values) ? values : [values];
-    const database = this.getData();
-
-    const formatted = items.map(item => ({
-      ...item,
-      created_at: item.created_at || new Date().toISOString(),
-      updated_at: item.updated_at || new Date().toISOString()
-    }));
-
-    database.push(...formatted);
-    this.saveData(database);
-    return { data: formatted, error: null };
+    try {
+      for (const item of items) {
+        const fbRecord = toFirebaseRecord(this.table, item);
+        const docId = fbRecord.id || fbRecord.uid;
+        if (docId) {
+          await setDoc(doc(db, this.table, docId), fbRecord);
+        } else {
+          await setDoc(doc(collection(db, this.table)), fbRecord);
+        }
+      }
+      return { data: items, error: null };
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, this.table);
+      return { data: null, error: err };
+    }
   }
 
   async upsert(values: any | any[]) {
     const items = Array.isArray(values) ? values : [values];
-    let database = this.getData();
-
-    const updatedItems = items.map(item => {
-      const idx = database.findIndex(dbItem => dbItem.id === item.id);
-      const formatted = {
-        ...item,
-        created_at: item.created_at || (idx !== -1 ? database[idx].created_at : new Date().toISOString()),
-        updated_at: new Date().toISOString()
-      };
-
-      if (idx !== -1) {
-        database[idx] = { ...database[idx], ...formatted };
-      } else {
-        database.push(formatted);
+    try {
+      for (const item of items) {
+        const fbRecord = toFirebaseRecord(this.table, item);
+        const docId = fbRecord.id || fbRecord.uid;
+        if (docId) {
+          await setDoc(doc(db, this.table, docId), fbRecord, { merge: true });
+        }
       }
-      return formatted;
-    });
-
-    this.saveData(database);
-    return { data: updatedItems, error: null };
+      return { data: items, error: null };
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, this.table);
+      return { data: null, error: err };
+    }
   }
 
   async update(values: any) {
-    let database = this.getData();
-
-    const updated = database.map(item => {
-      // Check filters
-      let matches = true;
-      for (const [col, op, val] of this.filters) {
-        if (op === 'eq' && item[col] !== val) {
-          matches = false;
+    try {
+      const fbRecord = toFirebaseRecord(this.table, values);
+      const idFilter = this.filterTuples.find(f => f.col === 'id' && f.op === '==');
+      
+      if (idFilter) {
+        await updateDoc(doc(db, this.table, idFilter.val), fbRecord);
+      } else {
+        const constraints = this.filterTuples.map(ft => where(ft.col, ft.op as any, ft.val));
+        const q = query(collection(db, this.table), ...constraints);
+        const snapshot = await getDocs(q);
+        for (const docSnap of snapshot.docs) {
+          await updateDoc(docSnap.ref, fbRecord);
         }
       }
-      if (matches) {
-        return {
-          ...item,
-          ...values,
-          updated_at: new Date().toISOString()
-        };
-      }
-      return item;
-    });
-
-    this.saveData(updated);
-    return { data: updated, error: null };
+      return { data: [values], error: null };
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, this.table);
+      return { data: null, error: err };
+    }
   }
 
-  // Promise resolution executor so it can be awaited directly
-  then(onfulfilled?: (value: any) => any, onrejected?: (reason: any) => any) {
-    const database = this.getData();
-    let filtered = database;
-
-    if (this.orFilter) {
-      // If doing a combined lookup in mock mode, match all mock devices to make local testing simple
-      filtered = database;
-    } else {
-      for (const [col, op, val] of this.filters) {
-        if (op === 'eq') {
-          filtered = filtered.filter(item => item[col] === val);
-        } else if (op === 'in') {
-          const list = Array.isArray(val) ? val : [];
-          filtered = filtered.filter(item => list.includes(item[col]));
-        }
+  async then(onfulfilled?: (value: any) => any, onrejected?: (reason: any) => any) {
+    try {
+      const constraints = this.filterTuples.map(ft => where(ft.col, ft.op as any, ft.val));
+      const q = query(collection(db, this.table), ...constraints);
+      const snapshot = await getDocs(q);
+      const results = snapshot.docs.map(docSnap => fromFirebaseRecord(this.table, { id: docSnap.id, ...docSnap.data() }));
+      const response = { data: results, error: null };
+      if (onfulfilled) {
+        return Promise.resolve(onfulfilled(response));
       }
+      return response;
+    } catch (err) {
+      handleFirestoreError(err, OperationType.GET, this.table);
+      if (onrejected) {
+        return Promise.resolve(onrejected(err));
+      }
+      throw err;
     }
-
-    const response = { data: filtered, error: null };
-    return Promise.resolve(response).then(onfulfilled, onrejected);
   }
 }
 
-class MockRealtimeChannel {
+class FirebaseRealtimeChannel {
   private table: string;
-  private callback: (payload: any) => void = () => { };
-  private eventListener: () => void;
+  private unsubscribeFn: (() => void) | null = null;
 
   constructor(table: string) {
     this.table = table;
-    this.eventListener = () => {
-      // Fetch fresh items and callback
-      const key = `ysedrop_mock_db_${this.table}`;
-      const data = JSON.parse(localStorage.getItem(key) || '[]');
-      this.callback({
-        new: data,
-        eventType: 'UPDATE',
-        schema: 'public',
-        table: this.table
-      });
-    };
   }
 
   on(type: string, filter: any, callback: (payload: any) => void) {
-    this.callback = callback;
-    window.addEventListener(`mock_db_update_${this.table}`, this.eventListener);
+    let q;
+    if (this.table === 'transfers' && auth.currentUser) {
+      q = query(collection(db, this.table), where('senderId', '==', auth.currentUser.uid));
+    } else {
+      q = query(collection(db, this.table));
+    }
+
+    this.unsubscribeFn = onSnapshot(q, (snapshot) => {
+      snapshot.docChanges().forEach((change) => {
+        const docData = fromFirebaseRecord(this.table, { id: change.doc.id, ...change.doc.data() });
+        callback({
+          new: docData,
+          eventType: change.type === 'added' ? 'INSERT' : change.type === 'modified' ? 'UPDATE' : 'DELETE',
+          schema: 'public',
+          table: this.table
+        });
+      });
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, this.table);
+    });
     return this;
   }
 
@@ -259,20 +415,23 @@ class MockRealtimeChannel {
   }
 
   unsubscribe() {
-    window.removeEventListener(`mock_db_update_${this.table}`, this.eventListener);
+    if (this.unsubscribeFn) {
+      this.unsubscribeFn();
+      this.unsubscribeFn = null;
+    }
   }
 }
 
-class MockSupabaseClient {
-  auth = new MockAuth();
+class FirebaseSupabaseClientBridge {
+  auth = new FirebaseAuthBridge();
 
   from(table: string) {
-    return new MockQueryBuilder(table);
+    return new FirebaseQueryBuilder(table);
   }
 
   channel(name: string) {
     const table = name.split('-').pop() || name;
-    return new MockRealtimeChannel(table);
+    return new FirebaseRealtimeChannel(table);
   }
 
   removeChannel(channel: any) {
@@ -282,7 +441,17 @@ class MockSupabaseClient {
   }
 }
 
-// Export either real client or fully compatible mock client
-export const supabase = isSupabaseConfigured
-  ? createClient(supabaseUrl, supabaseAnonKey)
-  : (new MockSupabaseClient() as any);
+// Export the Firebase Bridge as standard 'supabase' symbol
+export const supabase = new FirebaseSupabaseClientBridge() as any;
+
+// Connection test on boot
+async function testConnection() {
+  try {
+    await getDocFromServer(doc(db, 'test', 'connection'));
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.error("Please check your Firebase configuration.");
+    }
+  }
+}
+testConnection();

@@ -38,12 +38,14 @@ export function SupabaseProvider({ children }: { children: React.ReactNode }) {
 
           setUser(mappedUser);
 
-          // Synchronize user to Database (upsert)
-          await supabase.from('users').upsert({
+          // Synchronize user to Database (upsert) - run in background to avoid blocking UI initialization
+          supabase.from('users').upsert({
             id: u.id,
             email: u.email,
             display_name: mappedUser.displayName,
             photo_url: mappedUser.photoURL,
+          }).catch((dbErr: any) => {
+            console.error('Error writing user session database sync:', dbErr);
           });
         }
       } catch (err) {
@@ -57,7 +59,6 @@ export function SupabaseProvider({ children }: { children: React.ReactNode }) {
 
     // 2. Listen to auth changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event: any, session: { user: any; }) => {
-      setLoading(true);
       if (session?.user) {
         const u = session.user;
         const mappedUser = {
@@ -70,11 +71,14 @@ export function SupabaseProvider({ children }: { children: React.ReactNode }) {
         setUser(mappedUser);
 
         try {
-          await supabase.from('users').upsert({
+          // Synchronize user in background without blocking state variables
+          supabase.from('users').upsert({
             id: u.id,
             email: u.email,
             display_name: mappedUser.displayName,
             photo_url: mappedUser.photoURL,
+          }).catch((dbErr: any) => {
+            console.error('Error writing user session database sync:', dbErr);
           });
         } catch (dbErr) {
           console.error('Error writing user session database sync:', dbErr);

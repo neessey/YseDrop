@@ -8,6 +8,7 @@ async function startServer() {
   const app = express();
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
+    maxHttpBufferSize: 1e9, // Support up to 1GB files
     cors: {
       origin: "*",
       methods: ["GET", "POST"]
@@ -33,7 +34,6 @@ async function startServer() {
       .filter(d => d.userEmail === cleanEmail);
 
     devicesList.forEach(dev => {
-      // Envoie à chaque appareil la liste de TOUS les autres appareils partageant cet email
       const others = devicesList.filter(o => o.deviceId !== dev.deviceId);
       io.to(dev.deviceId).emit("devices-list-updated", others);
     });

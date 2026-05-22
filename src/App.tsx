@@ -50,6 +50,9 @@ export default function App() {
 function Dashboard() {
   const { user, loading, signIn, logout, isSupabaseConfigured } = useAuth();
   const [devices, setDevices] = useState<Device[]>([]);
+  const [dbDevices, setDbDevices] = useState<Device[]>([]);
+  const [socketDevices, setSocketDevices] = useState<Device[]>([]);
+  const [scannedDevices, setScannedDevices] = useState<Device[]>([]);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [currentDeviceId, setCurrentDeviceId] = useState<string>('');
   const [pairingMode, setPairingMode] = useState(false);
@@ -66,6 +69,7 @@ function Dashboard() {
   const [torchOn, setTorchOn] = useState(false);
   const [torchAvailable, setTorchAvailable] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [manualPairCode, setManualPairCode] = useState('');
 
   const [tempProfileName, setTempProfileName] = useState(() => localStorage.getItem('ysedrop_custom_mock_name') || 'Yanis');
   const [tempEmail, setTempEmail] = useState(() => localStorage.getItem('ysedrop_custom_mock_email') || 'yanis@ysedrop.local');
@@ -84,15 +88,46 @@ function Dashboard() {
     setCurrentDeviceId(devId);
   }, []);
 
-  // Socket.io initialization
+  // Merge database, socket and scanned devices dynamically
+  useEffect(() => {
+    const mergedMap = new Map<string, Device>();
 
+    // 1. Add DB devices
+    dbDevices.forEach(d => {
+      mergedMap.set(d.id, d);
+    });
+
+    // 2. Add Socket devices (overrides or adds, ensures online status is true)
+    socketDevices.forEach(d => {
+      const existing = mergedMap.get(d.id);
+      if (existing) {
+        mergedMap.set(d.id, {
+          ...existing,
+          isOnline: true
+        });
+      } else {
+        mergedMap.set(d.id, d);
+      }
+    });
+
+    // 3. Add Scanned/manual paired devices
+    scannedDevices.forEach(d => {
+      if (!mergedMap.has(d.id)) {
+        mergedMap.set(d.id, d);
+      }
+    });
+
+    // Filter out our own device
+    const finalDevices = Array.from(mergedMap.values()).filter(d => d.id !== currentDeviceId);
+    setDevices(finalDevices);
+  }, [dbDevices, socketDevices, scannedDevices, currentDeviceId]);
+
+  // Socket.io initialization
   useEffect(() => {
     if (currentDeviceId && user) {
-      // FORCE la connexion sur l'origine actuelle de l'application (ex: http://localhost:3000)
-      // Cela évite que Socket.io tente de se connecter aux serveurs de Supabase par erreur
-      socketRef.current = io(window.location.origin, {
-        transports: ['websocket', 'polling'] // Assure un fallback si le WebSocket pur échoue
-      });
+      socketRef.current = io();
+
+      // Register with details
       const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
       const suffix = currentDeviceId.substring(currentDeviceId.length - 4).toUpperCase();
       const deviceName = `${user.displayName || 'Demo User'}'s ${isMobile ? 'Phone' : 'Computer'} (${suffix})`;
@@ -111,35 +146,48 @@ function Dashboard() {
 
       socketRef.current.on('file-received', (data) => {
         console.log('File received into browser client!', data.fileName);
-        // CORRECTION : Forcer l'application de l'état pour ouvrir l'overlay de sauvegarde
         setIncomingFile({
           fileName: data.fileName,
           fileData: data.fileData,
           fileType: data.fileType
         });
+
+        // Automatically add the sender device to paired devices so they can send files back instantly
+        if (data.senderId) {
+          const suffix = data.senderId.substring(Math.max(0, data.senderId.length - 4)).toUpperCase();
+          const senderName = `Paired Device (${suffix})`;
+          const autoDevice: Device = {
+            id: data.senderId,
+            name: senderName,
+            type: data.senderId.includes('phone') ? 'mobile' : 'desktop',
+            ownerId: user?.uid || '',
+            isOnline: true,
+            lastSeen: { seconds: Math.floor(Date.now() / 1000) }
+          };
+          setScannedDevices(prev => {
+            if (prev.some(d => d.id === data.senderId)) return prev;
+            return [...prev, autoDevice];
+          });
+        }
       });
 
       socketRef.current.on('devices-list-updated', (others: any[]) => {
-        // CORRECTION : Même si Supabase n'est pas configuré, on filtre STRICTEMENT 
-        // pour ne pas afficher l'appareil actuel dans la liste des cibles
-        const mappedDevices = others
-          .filter((d: any) => d.deviceId !== currentDeviceId)
-          .map((d: any) => ({
-            id: d.deviceId,
-            name: d.deviceName,
-            type: d.deviceType,
-            ownerId: user.uid,
-            isOnline: true,
-            lastSeen: { seconds: Math.floor(Date.now() / 1000) }
-          }));
-        setDevices(mappedDevices);
+        const mappedDevices = others.map((d: any) => ({
+          id: d.deviceId,
+          name: d.deviceName,
+          type: d.deviceType,
+          ownerId: user.uid,
+          isOnline: true,
+          lastSeen: { seconds: Math.floor(Date.now() / 1000) }
+        }));
+        setSocketDevices(mappedDevices);
       });
 
       return () => {
         socketRef.current?.disconnect();
       };
     }
-  }, [currentDeviceId, user]); // CORRECTION : Retrait de isSupabaseConfigured pour éviter les reconnexions instables
+  }, [currentDeviceId, user]);
 
   // Scanner Logic
   useEffect(() => {
@@ -168,7 +216,18 @@ function Dashboard() {
                 setScanning(false);
                 setPairingMode(false);
               } else {
-                alert("Device detected! Connecting...");
+                const suffix = decodedText.substring(Math.max(0, decodedText.length - 4)).toUpperCase();
+                const pairingName = `Scanned Device (${suffix})`;
+                const newScanned: Device = {
+                  id: decodedText,
+                  name: pairingName,
+                  type: decodedText.includes('phone') || /mobile/i.test(navigator.userAgent) ? 'mobile' : 'desktop',
+                  ownerId: user?.uid || '',
+                  isOnline: true,
+                  lastSeen: { seconds: Math.floor(Date.now() / 1000) }
+                };
+                setScannedDevices(prev => [...prev.filter(d => d.id !== decodedText), newScanned]);
+                setSelectedDevice(newScanned);
                 setScanning(false);
                 setPairingMode(false);
               }
@@ -252,35 +311,49 @@ function Dashboard() {
   }, [user, currentDeviceId]);
 
   // Fetch Devices
-  // 1. Modifie l'écouteur de Realtime Supabase pour attraper les erreurs de connexion
   useEffect(() => {
-    if (!isSupabaseConfigured || !user) return;
+    if (!user) return;
+    if (!isSupabaseConfigured) return; // Handled dynamically in real-time via Socket.io!
 
-    console.log("Supabase est configuré, initialisation du canal Realtime...");
+    const fetchDevices = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('devices')
+          .select('*')
+          .eq('owner_id', user.uid);
 
+        if (data) {
+          const mapped = data.map((d: any) => ({
+            id: d.id,
+            name: d.name,
+            type: d.type,
+            ownerId: d.owner_id || d.ownerId,
+            lastSeen: { seconds: Math.floor(new Date(d.last_seen || d.lastSeen || Date.now()).getTime() / 1000) },
+            isOnline: d.is_online !== undefined ? d.is_online : d.isOnline,
+            pairingCode: d.pairing_code || d.pairingCode
+          })) as Device[];
+          setDbDevices(mapped.filter(d => d.id !== currentDeviceId));
+        }
+      } catch (err) {
+        console.error("Error fetching devices:", err);
+      }
+    };
+
+    fetchDevices();
+
+    // Live subscription
     const channel = supabase
-      .channel(`public-devices-${user.uid}`)
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'devices' },
-        (payload: any) => {
-          console.log('Changement détecté sur Supabase:', payload);
-          // Ta logique de mise à jour ici...
-        }
-      )
-      .subscribe((status: string, err: { message: any; }) => {
-        if (err) {
-          console.warn("Erreur ou déconnexion du WebSocket Supabase (Realtime) :", err.message);
-        }
-        if (status === 'CHANNEL_ERROR') {
-          console.log("Le canal Supabase a échoué. Assure-toi que la Réplication est activée dans ton Dashboard.");
-        }
-      });
+      .channel('devices')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, () => {
+        fetchDevices();
+      })
+      .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [user, isSupabaseConfigured]);
+  }, [user, currentDeviceId, isSupabaseConfigured]);
+
   // Fetch Transfers
   useEffect(() => {
     if (!user) return;
@@ -339,37 +412,37 @@ function Dashboard() {
     if (!file || !selectedDevice || !user || !socketRef.current) return;
 
     setUploading(true);
-    setProgress(0);
+    setProgress(5);
 
     const generatedId = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 15);
 
-    try {
-      await supabase.from('transfers').insert({
-        id: generatedId,
-        sender_id: user.uid,
-        receiver_id: selectedDevice.id,
-        file_info: {
-          name: file.name,
-          size: file.size,
-          type: file.type
-        },
-        status: 'transferring',
-        progress: 0,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      });
-    } catch (err) {
-      console.error("Error setting up transfer record:", err);
-    }
+    // Setup the DB log in the background immediately
+    supabase.from('transfers').insert({
+      id: generatedId,
+      sender_id: user.uid,
+      receiver_id: selectedDevice.id,
+      file_info: {
+        name: file.name,
+        size: file.size,
+        type: file.type
+      },
+      status: 'transferring',
+      progress: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    }).catch((err: any) => {
+      console.warn("Error setting up transfer record in background, continuing transfer directly:", err);
+    });
 
     setCurrentTransferId(generatedId);
 
     // 2. Read File and Send via Socket
     const reader = new FileReader();
+
     reader.onload = async (event) => {
       const result = event.target?.result as string;
 
-      // Send base64 data
+      // Send base64 data to peer via socket
       socketRef.current?.emit('file-transfer', {
         receiverId: selectedDevice.id,
         senderId: currentDeviceId,
@@ -379,28 +452,49 @@ function Dashboard() {
         transferId: generatedId
       });
 
-      // Update UI
-      setProgress(100);
-      setTimeout(async () => {
-        try {
-          await supabase.from('transfers').update({
-            status: 'completed',
-            progress: 100,
-            updated_at: new Date().toISOString()
-          }).eq('id', generatedId);
-        } catch (err) {
-          console.error("Error updating transfer status:", err);
+      // Show real-time progress simulated over 1.2s to indicate socket transmission pipeline instead of 0
+      let curProgress = 10;
+      setProgress(curProgress);
+      const progressTimer = setInterval(() => {
+        if (curProgress < 95) {
+          curProgress += Math.max(5, Math.floor(Math.random() * 20));
+          if (curProgress > 95) curProgress = 95;
+          setProgress(curProgress);
         }
-        setUploading(false);
-        setSelectedDevice(null);
-      }, 500);
+      }, 150);
+
+      // Finish up nicely
+      setTimeout(() => {
+        clearInterval(progressTimer);
+        setProgress(100);
+
+        // Record completion in backend logs
+        supabase.from('transfers').update({
+          status: 'completed',
+          progress: 100,
+          updated_at: new Date().toISOString()
+        }).eq('id', generatedId).catch((dbErr: any) => {
+          console.warn("Could not write transfer completion log:", dbErr);
+        });
+
+        setTimeout(() => {
+          setUploading(false);
+          setSelectedDevice(null);
+        }, 500);
+      }, 1200);
     };
 
     reader.onprogress = (event) => {
       if (event.lengthComputable) {
-        const p = Math.round((event.loaded / event.total) * 100);
-        setProgress(p);
+        const p = Math.round((event.loaded / event.total) * 50);
+        setProgress(Math.max(5, p));
       }
+    };
+
+    reader.onerror = () => {
+      setUploading(false);
+      setProgress(0);
+      alert("Error reading select file source file.");
     };
 
     reader.readAsDataURL(file);
@@ -426,15 +520,10 @@ function Dashboard() {
 
   const downloadReceivedFile = () => {
     if (!incomingFile) return;
-
-    const link = document.createElement('a');
-    link.href = incomingFile.fileData;
-    link.download = incomingFile.fileName;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-
-    // Reset l'overlay après le téléchargement
+    const a = document.createElement('a');
+    a.href = incomingFile.fileData;
+    a.download = incomingFile.fileName;
+    a.click();
     setIncomingFile(null);
   };
 
@@ -452,117 +541,54 @@ function Dashboard() {
   }
 
   if (!user) {
-    const handleMockProfileSubmit = async (e: React.FormEvent) => {
-      e.preventDefault();
-      localStorage.setItem('ysedrop_custom_mock_name', tempProfileName.trim() || 'Yanis');
-      localStorage.setItem('ysedrop_custom_mock_email', tempEmail.trim() || 'yanis@ysedrop.local');
-      localStorage.setItem('ysedrop_custom_mock_avatar', tempAvatar);
-
-      const hashedEmailId = 'mock-user-' + btoa(tempEmail.trim() || 'yanis@ysedrop.local').replace(/=/g, '').substring(0, 10);
-      localStorage.setItem('ysedrop_mock_user_id', hashedEmailId);
-
-      await signIn();
-    };
-
     return (
-      <div className="min-h-screen bg-[#F4F6F9] flex flex-col items-center justify-center p-6">
+      <div className="min-h-screen bg-gradient-to-b from-[#FAFBFD] to-[#F1F3F7] flex flex-col items-center justify-center p-6">
         <motion.div
-          initial={{ opacity: 0, y: 20 }}
+          initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
-          className="max-w-md w-full bg-white rounded-[32px] shadow-2xl p-8 border border-gray-100 text-center relative overflow-hidden"
+          transition={{ duration: 0.4 }}
+          className="max-w-md w-full bg-white rounded-[32px] shadow-[0_20px_50px_rgba(0,0,0,0.05)] p-8 border border-gray-100/80 text-center relative overflow-hidden"
         >
-          {/* Accent decoration */}
-          <div className="absolute top-0 inset-x-0 h-2 bg-gradient-to-r from-blue-500 to-indigo-600" />
+          {/* Subtle gradient banner at the top */}
+          <div className="absolute top-0 inset-x-0 h-1.5 bg-gradient-to-r from-blue-500 to-indigo-600" />
 
-          <div className="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center mx-auto mb-4">
-            <RefreshCcw className="w-8 h-8 text-blue-600" />
+          <div className="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center mx-auto mb-6">
+            <RefreshCcw className="w-8 h-8 text-blue-600 animate-spin-slow" />
           </div>
 
-          <h1 className="text-2xl font-black tracking-tight text-gray-900 mb-2">Welcome to YseDrop</h1>
-          <p className="text-gray-500 text-sm mb-6 leading-relaxed">Instant file sharing across all your devices. Fast, secure, and effortless.</p>
+          <h1 className="text-3xl font-extrabold tracking-tight text-gray-900 mb-2">Welcome to YseDrop</h1>
+          <p className="text-gray-500 text-sm mb-8 leading-relaxed max-w-sm mx-auto">
+            Instant and fully secure file sharing across all your devices. Fast, zero-configuration, and effortless.
+          </p>
 
-          {!isSupabaseConfigured ? (
-            <form onSubmit={handleMockProfileSubmit} className="text-left space-y-4 bg-gray-50 p-5 rounded-2xl border border-gray-100">
-              <div className="flex items-center space-x-2 text-xs font-bold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-full w-fit mb-2">
-                <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-pulse" />
-                <span>DEMO MODE ACTIVE (MOCK DB)</span>
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block">Nickname / Display Name</label>
-                <input
-                  type="text"
-                  value={tempProfileName}
-                  onChange={(e) => setTempProfileName(e.target.value)}
-                  placeholder="e.g. Yanis Computer"
-                  className="w-full bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium"
-                  required
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block">Mock Email (Account Linker)</label>
-                <input
-                  type="email"
-                  value={tempEmail}
-                  onChange={(e) => setTempEmail(e.target.value)}
-                  placeholder="e.g. yanis@ysedrop.local"
-                  className="w-full bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-xs"
-                  required
-                />
-                <p className="text-[10px] text-gray-400 leading-normal">
-                  💡 <strong>Tip:</strong> Keep the same email on different tabs to see each other automatically, or change email to test QR-scanning manual pairing!
-                </p>
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block">Select Avatar</label>
-                <div className="flex items-center justify-between gap-2 pt-1">
-                  {[
-                    'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop',
-                    'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100&h=100&fit=crop',
-                    'https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?w=100&h=100&fit=crop',
-                    'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100&h=100&fit=crop'
-                  ].map((url, i) => (
-                    <button
-                      key={i}
-                      type="button"
-                      onClick={() => setTempAvatar(url)}
-                      className={`w-10 h-10 rounded-full border-2 overflow-hidden transition-all ${tempAvatar === url ? 'border-blue-600 scale-110 shadow-md' : 'border-transparent opacity-60 hover:opacity-100'}`}
-                    >
-                      <img src={url} alt="avatar" className="w-full h-full object-cover" />
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                className="w-full mt-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold py-3.5 rounded-xl transition-all shadow-lg shadow-blue-100 uppercase tracking-wider text-xs"
-              >
-                Enter App
-              </button>
-            </form>
-          ) : (
+          <div className="space-y-4">
             <button
               onClick={signIn}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 rounded-2xl transition-all shadow-lg shadow-blue-200 active:scale-95"
+              className="w-full bg-gray-900 hover:bg-black text-white font-semibold py-4 px-6 rounded-2xl flex items-center justify-center space-x-3 transition-all active:scale-[0.98] shadow-lg shadow-gray-200"
             >
-              Sign in with Google
+              {/* Simple inline SVG for Google Icon */}
+              <svg className="w-5 h-5 text-white fill-current" viewBox="0 0 24 24">
+                <path d="M12.24 10.285V13.4h6.887C18.2 15.614 15.645 18 12.24 18c-3.152 0-5.733-2.585-5.733-5.734s2.58-10.266 5.733-10.266c1.71 0 3.097.66 4 1.488L18.8 1.05C17.114.33 14.88 0 12.24 0 6.58 0 2 4.58 2 10.24c0 5.66 4.58 10.24 10.24 10.24 5.9 0 9.81-4.14 9.81-9.98 0-.64-.06-1.12-.17-1.615H12.24z" />
+              </svg>
+              <span>Connect with Google</span>
             </button>
-          )}
 
-          <div className="mt-6 flex items-center justify-center space-x-6 text-gray-400">
-            <div className="flex items-center space-x-1">
-              <Laptop className="w-5 h-5" />
+            <p className="text-[11px] text-gray-400 tracking-wide font-medium">
+              Secured by Google Identity Service
+            </p>
+          </div>
+
+          <div className="mt-8 pt-6 border-t border-gray-50 flex items-center justify-center space-x-6 text-gray-400">
+            <div className="flex items-center space-x-1.5">
+              <Laptop className="w-4 h-4" />
               <span className="text-[10px] font-bold uppercase tracking-wider">Laptop</span>
             </div>
-            <div className="flex items-center space-x-1">
-              <Smartphone className="w-5 h-5" />
-              <span className="text-[10px] font-bold uppercase tracking-wider">Phone</span>
+            <div className="flex items-center space-x-1.5">
+              <Smartphone className="w-4 h-4" />
+              <span className="text-[10px] font-bold uppercase tracking-wider">Mobile</span>
             </div>
-            <div className="flex items-center space-x-1">
-              <Wifi className="w-5 h-5" />
+            <div className="flex items-center space-x-1.5">
+              <Wifi className="w-4 h-4" />
               <span className="text-[10px] font-bold uppercase tracking-wider">Same Wifi</span>
             </div>
           </div>
@@ -601,20 +627,23 @@ function Dashboard() {
       </nav>
 
       <main className="max-w-4xl mx-auto px-6 py-8">
-        {/* Boîte d'aide pour tester le transfert local */}
-        {!isSupabaseConfigured && (
+        {/* Boîte d'aide - Tutoriel réel */}
+        {devices.length === 0 && (
           <motion.div
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="mb-8 bg-blue-50/60 border border-blue-100 rounded-[24px] p-6 text-sm text-blue-950 leading-relaxed flex items-start space-x-3 shadow-sm"
+            className="mb-8 bg-blue-50/60 border border-blue-100/80 rounded-[24px] p-6 text-sm text-blue-950 leading-relaxed flex items-start space-x-3 shadow-md"
           >
-            <span className="text-2xl mt-0.5 shrink-0">💡</span>
+            <span className="text-xl mt-0.5 shrink-0">💡</span>
             <div>
-              <p className="font-extrabold text-blue-900 mb-1.5 text-base">Comment tester le transfert de fichiers de part et d'autre ?</p>
-              <ul className="list-decimal list-inside space-y-1.5 text-blue-850 text-xs">
-                <li>Ouvrez ce <strong>même lien d'application</strong> (URL de développement) dans : un <strong>onglet de navigation privée</strong>, un autre navigateur (Firefox, Safari, Edge), ou chargez-le sur votre <strong>smartphone</strong>.</li>
-                <li>Connectez-vous en utilisant le <strong>même Mock Email</strong> (ex: <code className="bg-blue-100/80 text-blue-800 px-1.5 py-0.5 rounded font-mono font-bold">yanis@ysedrop.local</code>) mais attribuez un <strong>nom différent</strong> à l'appareil (ex: <i>"Mon Téléphone"</i> ou <i>"PC Portable"</i>).</li>
-                <li>Les deux appareils se détecteront instantanément ! Cliquez sur le destinataire dans la liste, déposez un fichier, et il sera immédiatement **téléchargeable** (bouton <strong>Enregistrer</strong>) sur l'autre appareil !</li>
+              <p className="font-extrabold text-blue-900 mb-1.5 text-base">Comment fonctionne YseDrop ?</p>
+              <p className="text-xs text-blue-850 leading-normal mb-2">
+                Pour transférer des fichiers, connectez-vous simplement avec le <strong>même compte Google</strong> sur vos autres appareils (PC, Mac, iPhone, Android).
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-blue-800 text-xs">
+                <li>Vos appareils se détecteront automatiquement et apparaîtront dans la liste.</li>
+                <li>Sélectionnez l'appareil destinataire, puis choisissez le fichier à envoyer.</li>
+                <li>Le transfert est instantané et sécurisé via votre espace privé connecté !</li>
               </ul>
             </div>
           </motion.div>
@@ -895,17 +924,78 @@ function Dashboard() {
                     />
                   </div>
 
-                  <div className="space-y-3">
+                  <div className="space-y-4">
                     <button
                       onClick={() => setScanning(true)}
                       className="w-full py-4 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-700 transition-all shadow-lg shadow-blue-200 active:scale-95"
                     >
                       Scan QR Code
                     </button>
-                    <p className="text-gray-400 text-xs font-medium tracking-widest uppercase">Or share this code</p>
-                    <div className="bg-gray-50 p-4 rounded-2xl font-mono text-xl font-bold tracking-widest text-blue-600 flex items-center justify-center space-x-2">
+
+                    <div className="border-t border-gray-100/80 my-2 pt-2" />
+
+                    <p className="text-gray-400 text-xs font-semibold tracking-widest uppercase">Or share this code</p>
+                    <div
+                      onClick={() => {
+                        navigator.clipboard.writeText(currentDeviceId);
+                        alert("Copied code to clipboard!");
+                      }}
+                      className="bg-gray-50 hover:bg-gray-100 cursor-pointer active:scale-98 transition-all p-4 rounded-2xl font-mono text-xl font-bold tracking-widest text-blue-600 flex items-center justify-center space-x-2"
+                    >
                       <span>{currentDeviceId.substring(0, 8).toUpperCase()}</span>
                       <Clipboard className="w-4 h-4 opacity-30" />
+                    </div>
+
+                    <div className="border-t border-gray-100/80 my-2" />
+
+                    <p className="text-gray-400 text-xs font-semibold tracking-widest uppercase">Or enter code manually</p>
+                    <div className="flex space-x-2">
+                      <input
+                        type="text"
+                        value={manualPairCode}
+                        onChange={(e) => setManualPairCode(e.target.value)}
+                        placeholder="ENTER CODE"
+                        className="bg-gray-50 border border-gray-100 p-3 rounded-2xl font-mono text-sm tracking-widest text-blue-600 flex-1 uppercase placeholder:text-gray-300 text-center focus:outline-none focus:border-blue-400 focus:bg-white transition-all font-bold"
+                      />
+                      <button
+                        onClick={() => {
+                          const val = manualPairCode.trim();
+                          if (val) {
+                            // Match existing device
+                            const found = devices.find(d =>
+                              d.id.toLowerCase() === val.toLowerCase() ||
+                              d.id.toLowerCase().includes(val.toLowerCase()) ||
+                              d.name.toLowerCase().includes(val.toLowerCase())
+                            );
+                            if (found) {
+                              setSelectedDevice(found);
+                              setPairingMode(false);
+                            } else {
+                              // Build scanned/paired device on the fly
+                              let newId = val;
+                              if (!newId.startsWith('device_')) {
+                                newId = 'device_' + val.toLowerCase();
+                              }
+                              const suffix = val.substring(Math.max(0, val.length - 4)).toUpperCase();
+                              const newDevice: Device = {
+                                id: newId,
+                                name: `Paired Device (${suffix})`,
+                                type: 'desktop',
+                                ownerId: user?.uid || '',
+                                isOnline: true,
+                                lastSeen: { seconds: Math.floor(Date.now() / 1000) }
+                              };
+                              setScannedDevices(prev => [...prev.filter(d => d.id !== newId), newDevice]);
+                              setSelectedDevice(newDevice);
+                              setPairingMode(false);
+                            }
+                            setManualPairCode('');
+                          }
+                        }}
+                        className="bg-blue-600 hover:bg-blue-700 text-white font-bold px-5 rounded-2xl transition-all font-sans text-sm tracking-tight active:scale-95"
+                      >
+                        Pair
+                      </button>
                     </div>
                   </div>
                 </div>

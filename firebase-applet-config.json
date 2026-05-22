@@ -1,10 +1,10 @@
 {
-  "projectId": "propane-baton-nwh20",
-  "appId": "1:945255780678:web:0760b703789257f4355547",
-  "apiKey": "AIzaSyDlD6ygmXTIXx7HB_udtk-Ckm1i8w5nZqY",
-  "authDomain": "propane-baton-nwh20.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-a49e2de9-f5f5-40be-9cbc-3485c124b048",
-  "storageBucket": "propane-baton-nwh20.firebasestorage.app",
-  "messagingSenderId": "945255780678",
-  "measurementId": ""
+  "apiKey": "AIzaSyCnpZTpXhUhVfDbdaQB8Fdf3ybSyMThW2Y",
+  "authDomain": "ysedrop-58a32.firebaseapp.com",
+  "projectId": "ysedrop-58a32",
+  "storageBucket": "ysedrop-58a32.firebasestorage.app",
+  "messagingSenderId": "925216223445",
+  "appId": "1:925216223445:web:ad05aa24b88f352d04725c",
+  "measurementId": "G-R1PK6PM3QQ",
+  "firestoreDatabaseId": "(par défaut)"
 }
