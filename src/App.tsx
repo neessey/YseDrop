@@ -86,30 +86,54 @@ function Dashboard() {
 
   // Socket.io initialization
   useEffect(() => {
-    if (currentDeviceId) {
+    if (currentDeviceId && user) {
       socketRef.current = io();
-      socketRef.current.emit('register-device', currentDeviceId);
+
+      // Register with details
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+      const suffix = currentDeviceId.substring(currentDeviceId.length - 4).toUpperCase();
+      const deviceName = `${user.displayName || 'Demo User'}'s ${isMobile ? 'Phone' : 'Computer'} (${suffix})`;
+      const deviceType = isMobile ? 'mobile' : 'desktop';
+
+      socketRef.current.emit('register-device-detailed', {
+        deviceId: currentDeviceId,
+        userEmail: user.email,
+        deviceName: deviceName,
+        deviceType: deviceType
+      });
 
       socketRef.current.on('signaling', (data) => {
         console.log('Received signaling:', data);
       });
 
       socketRef.current.on('file-received', (data) => {
-        console.log('File received!', data.fileName);
+        console.log('File received into browser client!', data.fileName);
         setIncomingFile({
           fileName: data.fileName,
           fileData: data.fileData,
           fileType: data.fileType
         });
-        
-        // Auto-download for this demo, or show button
+      });
+
+      socketRef.current.on('devices-list-updated', (others: any[]) => {
+        if (!isSupabaseConfigured) {
+          const mappedDevices = others.map((d: any) => ({
+            id: d.deviceId,
+            name: d.deviceName,
+            type: d.deviceType,
+            ownerId: user.uid,
+            isOnline: true,
+            lastSeen: { seconds: Math.floor(Date.now() / 1000) }
+          }));
+          setDevices(mappedDevices);
+        }
       });
 
       return () => {
         socketRef.current?.disconnect();
       };
     }
-  }, [currentDeviceId]);
+  }, [currentDeviceId, user, isSupabaseConfigured]);
 
   // Scanner Logic
   useEffect(() => {
@@ -224,6 +248,7 @@ function Dashboard() {
   // Fetch Devices
   useEffect(() => {
     if (!user) return;
+    if (!isSupabaseConfigured) return; // Handled dynamically in real-time via Socket.io!
 
     const fetchDevices = async () => {
       try {
@@ -262,7 +287,7 @@ function Dashboard() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [user, currentDeviceId]);
+  }, [user, currentDeviceId, isSupabaseConfigured]);
 
   // Fetch Transfers
   useEffect(() => {
