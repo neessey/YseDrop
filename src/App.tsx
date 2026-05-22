@@ -1,14 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  Laptop, 
-  Smartphone, 
-  Plus, 
-  RefreshCcw, 
-  Settings, 
-  History, 
-  Send, 
-  CheckCircle2, 
+import {
+  Laptop,
+  Smartphone,
+  Plus,
+  RefreshCcw,
+  Settings,
+  History,
+  Send,
+  CheckCircle2,
   AlertCircle,
   QrCode,
   LogOut,
@@ -85,11 +85,14 @@ function Dashboard() {
   }, []);
 
   // Socket.io initialization
+
   useEffect(() => {
     if (currentDeviceId && user) {
-      socketRef.current = io();
-
-      // Register with details
+      // FORCE la connexion sur l'origine actuelle de l'application (ex: http://localhost:3000)
+      // Cela évite que Socket.io tente de se connecter aux serveurs de Supabase par erreur
+      socketRef.current = io(window.location.origin, {
+        transports: ['websocket', 'polling'] // Assure un fallback si le WebSocket pur échoue
+      });
       const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
       const suffix = currentDeviceId.substring(currentDeviceId.length - 4).toUpperCase();
       const deviceName = `${user.displayName || 'Demo User'}'s ${isMobile ? 'Phone' : 'Computer'} (${suffix})`;
@@ -108,6 +111,7 @@ function Dashboard() {
 
       socketRef.current.on('file-received', (data) => {
         console.log('File received into browser client!', data.fileName);
+        // CORRECTION : Forcer l'application de l'état pour ouvrir l'overlay de sauvegarde
         setIncomingFile({
           fileName: data.fileName,
           fileData: data.fileData,
@@ -116,8 +120,11 @@ function Dashboard() {
       });
 
       socketRef.current.on('devices-list-updated', (others: any[]) => {
-        if (!isSupabaseConfigured) {
-          const mappedDevices = others.map((d: any) => ({
+        // CORRECTION : Même si Supabase n'est pas configuré, on filtre STRICTEMENT 
+        // pour ne pas afficher l'appareil actuel dans la liste des cibles
+        const mappedDevices = others
+          .filter((d: any) => d.deviceId !== currentDeviceId)
+          .map((d: any) => ({
             id: d.deviceId,
             name: d.deviceName,
             type: d.deviceType,
@@ -125,20 +132,19 @@ function Dashboard() {
             isOnline: true,
             lastSeen: { seconds: Math.floor(Date.now() / 1000) }
           }));
-          setDevices(mappedDevices);
-        }
+        setDevices(mappedDevices);
       });
 
       return () => {
         socketRef.current?.disconnect();
       };
     }
-  }, [currentDeviceId, user, isSupabaseConfigured]);
+  }, [currentDeviceId, user]); // CORRECTION : Retrait de isSupabaseConfigured pour éviter les reconnexions instables
 
   // Scanner Logic
   useEffect(() => {
     let html5QrCode: Html5Qrcode | null = null;
-    
+
     if (scanning) {
       const timer = setTimeout(async () => {
         const element = document.getElementById('reader');
@@ -167,7 +173,7 @@ function Dashboard() {
                 setPairingMode(false);
               }
             },
-            () => {}
+            () => { }
           );
 
           // Check for torch availability
@@ -189,7 +195,7 @@ function Dashboard() {
       return () => {
         clearTimeout(timer);
         if (html5QrCode && html5QrCode.isScanning) {
-          html5QrCode.stop().catch(() => {});
+          html5QrCode.stop().catch(() => { });
         }
         scannerRef.current = null;
         setTorchOn(false);
@@ -217,7 +223,7 @@ function Dashboard() {
     if (user && currentDeviceId) {
       const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
       const suffix = currentDeviceId.substring(currentDeviceId.length - 4).toUpperCase();
-      
+
       const updateDevice = async () => {
         try {
           await supabase.from('devices').upsert({
@@ -238,7 +244,7 @@ function Dashboard() {
 
       // Heartbeat
       const interval = setInterval(updateDevice, 60000); // Every minute
-      
+
       return () => {
         clearInterval(interval);
       };
@@ -246,49 +252,35 @@ function Dashboard() {
   }, [user, currentDeviceId]);
 
   // Fetch Devices
+  // 1. Modifie l'écouteur de Realtime Supabase pour attraper les erreurs de connexion
   useEffect(() => {
-    if (!user) return;
-    if (!isSupabaseConfigured) return; // Handled dynamically in real-time via Socket.io!
+    if (!isSupabaseConfigured || !user) return;
 
-    const fetchDevices = async () => {
-      try {
-        const { data, error } = await supabase
-          .from('devices')
-          .select('*')
-          .eq('owner_id', user.uid);
-        
-        if (data) {
-          const mapped = data.map((d: any) => ({
-            id: d.id,
-            name: d.name,
-            type: d.type,
-            ownerId: d.owner_id || d.ownerId,
-            lastSeen: { seconds: Math.floor(new Date(d.last_seen || d.lastSeen || Date.now()).getTime() / 1000) },
-            isOnline: d.is_online !== undefined ? d.is_online : d.isOnline,
-            pairingCode: d.pairing_code || d.pairingCode
-          })) as Device[];
-          setDevices(mapped.filter(d => d.id !== currentDeviceId));
-        }
-      } catch (err) {
-        console.error("Error fetching devices:", err);
-      }
-    };
+    console.log("Supabase est configuré, initialisation du canal Realtime...");
 
-    fetchDevices();
-
-    // Live subscription
     const channel = supabase
-      .channel('devices')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, () => {
-        fetchDevices();
-      })
-      .subscribe();
+      .channel(`public-devices-${user.uid}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'devices' },
+        (payload: any) => {
+          console.log('Changement détecté sur Supabase:', payload);
+          // Ta logique de mise à jour ici...
+        }
+      )
+      .subscribe((status: string, err: { message: any; }) => {
+        if (err) {
+          console.warn("Erreur ou déconnexion du WebSocket Supabase (Realtime) :", err.message);
+        }
+        if (status === 'CHANNEL_ERROR') {
+          console.log("Le canal Supabase a échoué. Assure-toi que la Réplication est activée dans ton Dashboard.");
+        }
+      });
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [user, currentDeviceId, isSupabaseConfigured]);
-
+  }, [user, isSupabaseConfigured]);
   // Fetch Transfers
   useEffect(() => {
     if (!user) return;
@@ -299,7 +291,7 @@ function Dashboard() {
           .from('transfers')
           .select('*')
           .eq('sender_id', user.uid);
-        
+
         if (data) {
           const mapped = data.map((t: any) => ({
             id: t.id,
@@ -376,7 +368,7 @@ function Dashboard() {
     const reader = new FileReader();
     reader.onload = async (event) => {
       const result = event.target?.result as string;
-      
+
       // Send base64 data
       socketRef.current?.emit('file-transfer', {
         receiverId: selectedDevice.id,
@@ -391,8 +383,8 @@ function Dashboard() {
       setProgress(100);
       setTimeout(async () => {
         try {
-          await supabase.from('transfers').update({ 
-            status: 'completed', 
+          await supabase.from('transfers').update({
+            status: 'completed',
             progress: 100,
             updated_at: new Date().toISOString()
           }).eq('id', generatedId);
@@ -416,7 +408,7 @@ function Dashboard() {
 
   const cancelTransfer = async () => {
     if (!currentTransferId) return;
-    
+
     try {
       await supabase.from('transfers').update({
         status: 'failed',
@@ -434,17 +426,22 @@ function Dashboard() {
 
   const downloadReceivedFile = () => {
     if (!incomingFile) return;
-    const a = document.createElement('a');
-    a.href = incomingFile.fileData;
-    a.download = incomingFile.fileName;
-    a.click();
+
+    const link = document.createElement('a');
+    link.href = incomingFile.fileData;
+    link.download = incomingFile.fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+
+    // Reset l'overlay après le téléchargement
     setIncomingFile(null);
   };
 
   if (loading) {
     return (
       <div className="min-h-screen bg-[#FBFBFB] flex items-center justify-center">
-        <motion.div 
+        <motion.div
           animate={{ rotate: 360 }}
           transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
         >
@@ -460,41 +457,41 @@ function Dashboard() {
       localStorage.setItem('ysedrop_custom_mock_name', tempProfileName.trim() || 'Yanis');
       localStorage.setItem('ysedrop_custom_mock_email', tempEmail.trim() || 'yanis@ysedrop.local');
       localStorage.setItem('ysedrop_custom_mock_avatar', tempAvatar);
-      
+
       const hashedEmailId = 'mock-user-' + btoa(tempEmail.trim() || 'yanis@ysedrop.local').replace(/=/g, '').substring(0, 10);
       localStorage.setItem('ysedrop_mock_user_id', hashedEmailId);
-      
+
       await signIn();
     };
 
     return (
       <div className="min-h-screen bg-[#F4F6F9] flex flex-col items-center justify-center p-6">
-        <motion.div 
+        <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           className="max-w-md w-full bg-white rounded-[32px] shadow-2xl p-8 border border-gray-100 text-center relative overflow-hidden"
         >
           {/* Accent decoration */}
           <div className="absolute top-0 inset-x-0 h-2 bg-gradient-to-r from-blue-500 to-indigo-600" />
-          
+
           <div className="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center mx-auto mb-4">
             <RefreshCcw className="w-8 h-8 text-blue-600" />
           </div>
-          
+
           <h1 className="text-2xl font-black tracking-tight text-gray-900 mb-2">Welcome to YseDrop</h1>
           <p className="text-gray-500 text-sm mb-6 leading-relaxed">Instant file sharing across all your devices. Fast, secure, and effortless.</p>
-          
+
           {!isSupabaseConfigured ? (
             <form onSubmit={handleMockProfileSubmit} className="text-left space-y-4 bg-gray-50 p-5 rounded-2xl border border-gray-100">
               <div className="flex items-center space-x-2 text-xs font-bold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-full w-fit mb-2">
                 <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-pulse" />
                 <span>DEMO MODE ACTIVE (MOCK DB)</span>
               </div>
-              
+
               <div className="space-y-1.5">
                 <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block">Nickname / Display Name</label>
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   value={tempProfileName}
                   onChange={(e) => setTempProfileName(e.target.value)}
                   placeholder="e.g. Yanis Computer"
@@ -505,8 +502,8 @@ function Dashboard() {
 
               <div className="space-y-1.5">
                 <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block">Mock Email (Account Linker)</label>
-                <input 
-                  type="email" 
+                <input
+                  type="email"
                   value={tempEmail}
                   onChange={(e) => setTempEmail(e.target.value)}
                   placeholder="e.g. yanis@ysedrop.local"
@@ -539,7 +536,7 @@ function Dashboard() {
                 </div>
               </div>
 
-              <button 
+              <button
                 type="submit"
                 className="w-full mt-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold py-3.5 rounded-xl transition-all shadow-lg shadow-blue-100 uppercase tracking-wider text-xs"
               >
@@ -547,7 +544,7 @@ function Dashboard() {
               </button>
             </form>
           ) : (
-            <button 
+            <button
               onClick={signIn}
               className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 rounded-2xl transition-all shadow-lg shadow-blue-200 active:scale-95"
             >
@@ -586,13 +583,13 @@ function Dashboard() {
             <span className="font-bold text-xl tracking-tight uppercase">YseDrop</span>
           </div>
           <div className="flex items-center space-x-4">
-            <button 
+            <button
               onClick={() => setPairingMode(!pairingMode)}
               className="p-2 text-gray-500 hover:bg-gray-100 rounded-xl transition-colors"
             >
               <QrCode className="w-5 h-5" />
             </button>
-            <button 
+            <button
               onClick={logout}
               className="p-2 text-gray-500 hover:bg-gray-100 rounded-xl transition-colors"
             >
@@ -606,7 +603,7 @@ function Dashboard() {
       <main className="max-w-4xl mx-auto px-6 py-8">
         {/* Boîte d'aide pour tester le transfert local */}
         {!isSupabaseConfigured && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
             className="mb-8 bg-blue-50/60 border border-blue-100 rounded-[24px] p-6 text-sm text-blue-950 leading-relaxed flex items-start space-x-3 shadow-sm"
@@ -624,14 +621,14 @@ function Dashboard() {
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          
+
           {/* Left Column: Devices */}
           <div className="lg:col-span-7 space-y-8">
             <section>
               <div className="flex items-center justify-between mb-6">
                 <h2 className="text-xl font-bold tracking-tight">Devices</h2>
                 <div className="flex items-center space-x-2">
-                   <button 
+                  <button
                     onClick={() => { setPairingMode(true); setScanning(true); }}
                     className="flex items-center space-x-2 px-4 py-2 bg-blue-50 text-blue-600 text-sm font-bold rounded-xl hover:bg-blue-100 transition-colors"
                   >
@@ -644,7 +641,7 @@ function Dashboard() {
                   </span>
                 </div>
               </div>
-              
+
               <div className="grid grid-cols-2 gap-4">
                 {/* Current Device */}
                 <div className="bg-white p-5 rounded-3xl border-2 border-blue-100 shadow-sm relative overflow-hidden group">
@@ -664,7 +661,7 @@ function Dashboard() {
 
                 {/* Remote Devices */}
                 {devices.map((device) => (
-                  <motion.div 
+                  <motion.div
                     key={device.id}
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
@@ -686,7 +683,7 @@ function Dashboard() {
                   </motion.div>
                 ))}
 
-                <button 
+                <button
                   onClick={() => setPairingMode(true)}
                   className="bg-gray-50 border-2 border-dashed border-gray-200 p-5 rounded-3xl flex flex-col items-center justify-center transition-all hover:bg-gray-100 group"
                 >
@@ -713,7 +710,7 @@ function Dashboard() {
                         <h2 className="text-2xl font-bold mb-1">Send to {selectedDevice.name}</h2>
                         <p className="text-blue-100 text-sm">Select any file to transfer instantly.</p>
                       </div>
-                      <button 
+                      <button
                         onClick={() => setSelectedDevice(null)}
                         className="p-2 hover:bg-white/10 rounded-lg"
                       >
@@ -749,13 +746,13 @@ function Dashboard() {
                           <span className="font-mono">{progress}%</span>
                         </div>
                         <div className="h-3 bg-white/20 rounded-full overflow-hidden">
-                          <motion.div 
+                          <motion.div
                             className="h-full bg-white shadow-[0_0_15px_rgba(255,255,255,0.5)]"
                             initial={{ width: 0 }}
                             animate={{ width: `${progress}%` }}
                           />
                         </div>
-                        <button 
+                        <button
                           onClick={cancelTransfer}
                           className="w-full mt-4 py-3 bg-white/10 hover:bg-white/20 rounded-2xl flex items-center justify-center text-sm font-bold border border-white/10 transition-colors"
                         >
@@ -779,7 +776,7 @@ function Dashboard() {
                   <h2 className="font-bold tracking-tight">Recent Activity</h2>
                 </div>
               </div>
-              
+
               <div className="flex-1 overflow-y-auto p-2 scrollbar-thin scrollbar-thumb-gray-200">
                 <AnimatePresence initial={false}>
                   {transfers.length === 0 ? (
@@ -791,7 +788,7 @@ function Dashboard() {
                     </div>
                   ) : (
                     transfers.map((t) => (
-                      <motion.div 
+                      <motion.div
                         key={t.id}
                         initial={{ opacity: 0, x: -10 }}
                         animate={{ opacity: 1, x: 0 }}
@@ -828,14 +825,14 @@ function Dashboard() {
       <AnimatePresence>
         {pairingMode && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setPairingMode(false)}
               className="absolute inset-0 bg-black/20 backdrop-blur-sm"
             />
-            <motion.div 
+            <motion.div
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
@@ -843,7 +840,7 @@ function Dashboard() {
             >
               <div className="flex items-center justify-between mb-8">
                 <h2 className="text-2xl font-bold">Pair Device</h2>
-                <button 
+                <button
                   onClick={() => setPairingMode(false)}
                   className="p-2 hover:bg-gray-100 rounded-xl"
                 >
@@ -867,9 +864,9 @@ function Dashboard() {
                     ) : (
                       <div id="reader" className="w-full h-full" />
                     )}
-                    
+
                     {!cameraError && torchAvailable && (
-                      <button 
+                      <button
                         onClick={toggleFlashlight}
                         className={cn(
                           "absolute bottom-4 right-4 p-3 rounded-full shadow-lg transition-all z-20",
@@ -880,7 +877,7 @@ function Dashboard() {
                       </button>
                     )}
                   </div>
-                  <button 
+                  <button
                     onClick={() => setScanning(false)}
                     className="w-full py-4 border-2 border-gray-100 text-gray-900 font-bold rounded-2xl hover:bg-gray-50 transition-all"
                   >
@@ -890,16 +887,16 @@ function Dashboard() {
               ) : (
                 <div className="space-y-8">
                   <div className="p-6 bg-gray-50 rounded-[32px] inline-block border-4 border-white shadow-inner">
-                    <QRCodeSVG 
-                      value={currentDeviceId} 
+                    <QRCodeSVG
+                      value={currentDeviceId}
                       size={200}
                       level="H"
                       includeMargin={false}
                     />
                   </div>
-                  
+
                   <div className="space-y-3">
-                    <button 
+                    <button
                       onClick={() => setScanning(true)}
                       className="w-full py-4 bg-blue-600 text-white font-bold rounded-2xl hover:bg-blue-700 transition-all shadow-lg shadow-blue-200 active:scale-95"
                     >
@@ -921,7 +918,7 @@ function Dashboard() {
       {/* Incoming File Overlay */}
       <AnimatePresence>
         {incomingFile && (
-          <motion.div 
+          <motion.div
             initial={{ y: 100, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 100, opacity: 0 }}
@@ -929,18 +926,18 @@ function Dashboard() {
           >
             <div className="flex items-center space-x-4">
               {incomingFile.fileType.startsWith('image/') ? (
-                <img 
-                  src={incomingFile.fileData} 
-                  className="w-16 h-16 object-cover rounded-2xl border border-gray-100 shrink-0" 
-                  alt="Preview" 
+                <img
+                  src={incomingFile.fileData}
+                  className="w-16 h-16 object-cover rounded-2xl border border-gray-100 shrink-0"
+                  alt="Preview"
                 />
               ) : incomingFile.fileType.startsWith('video/') ? (
-                <video 
-                  src={incomingFile.fileData} 
-                  className="w-16 h-16 object-cover rounded-2xl border border-gray-100 shrink-0" 
-                  muted 
-                  autoPlay 
-                  loop 
+                <video
+                  src={incomingFile.fileData}
+                  className="w-16 h-16 object-cover rounded-2xl border border-gray-100 shrink-0"
+                  muted
+                  autoPlay
+                  loop
                 />
               ) : (
                 <div className="w-16 h-16 bg-blue-100 rounded-2xl flex items-center justify-center text-blue-600 shrink-0">
@@ -952,15 +949,15 @@ function Dashboard() {
                 <h4 className="font-bold truncate text-base text-gray-950">{incomingFile.fileName}</h4>
               </div>
             </div>
-            
+
             <div className="flex items-center space-x-3 w-full">
-              <button 
+              <button
                 onClick={() => setIncomingFile(null)}
                 className="flex-1 py-3 text-sm font-bold text-gray-500 hover:bg-gray-50 rounded-2xl transition-all border border-gray-100"
               >
                 Decline
               </button>
-              <button 
+              <button
                 onClick={downloadReceivedFile}
                 className="flex-1 bg-blue-600 text-white py-3 text-sm font-bold rounded-2xl shadow-xl shadow-blue-200 hover:bg-blue-700 active:scale-95 transition-all flex items-center justify-center space-x-2"
               >

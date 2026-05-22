@@ -31,8 +31,9 @@ async function startServer() {
     const cleanEmail = email.toLowerCase().trim();
     const devicesList = Array.from(activeDevices.values())
       .filter(d => d.userEmail === cleanEmail);
-    
+
     devicesList.forEach(dev => {
+      // Envoie à chaque appareil la liste de TOUS les autres appareils partageant cet email
       const others = devicesList.filter(o => o.deviceId !== dev.deviceId);
       io.to(dev.deviceId).emit("devices-list-updated", others);
     });
@@ -55,9 +56,9 @@ async function startServer() {
     }) => {
       if (!data || !data.deviceId) return;
       socket.join(data.deviceId);
-      
+
       const cleanEmail = (data.userEmail || 'demo@ysedrop.local').toLowerCase().trim();
-      
+
       // Store socket metadata
       (socket as any).deviceId = data.deviceId;
       (socket as any).userEmail = cleanEmail;
@@ -72,7 +73,7 @@ async function startServer() {
       });
 
       console.log(`Detailed device registered: ${data.deviceId} for email: ${cleanEmail}`);
-      
+
       // Broadcast update to everyone with the same email
       broadcastDevicesForEmail(cleanEmail);
     });
@@ -84,13 +85,13 @@ async function startServer() {
     });
 
     // Handle real file data proxying (Real transfer)
-    socket.on("file-transfer", (data: { 
-      receiverId: string, 
-      senderId: string, 
-      fileName: string, 
-      fileType: string, 
+    socket.on("file-transfer", (data: {
+      receiverId: string,
+      senderId: string,
+      fileName: string,
+      fileType: string,
       fileData: string,
-      transferId: string 
+      transferId: string
     }) => {
       console.log(`Sending file ${data.fileName} from ${data.senderId} to ${data.receiverId}`);
       io.to(data.receiverId).emit("file-received", data);
@@ -100,7 +101,7 @@ async function startServer() {
       console.log("Client disconnected:", socket.id);
       const deviceId = (socket as any).deviceId;
       const userEmail = (socket as any).userEmail;
-      
+
       if (deviceId) {
         activeDevices.delete(deviceId);
       }
