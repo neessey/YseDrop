@@ -12,8 +12,8 @@ export default defineConfig(() => {
       VitePWA({
         registerType: 'autoUpdate',
         manifest: {
-          name: 'YSE Drop',
-          short_name: 'YSE Drop',
+          name: 'YseDrop',
+          short_name: 'YseDrop',
           description: 'Transfert de fichiers sécurisé',
           theme_color: '#ffffff',
           background_color: '#ffffff',

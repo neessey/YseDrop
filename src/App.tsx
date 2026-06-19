@@ -32,6 +32,8 @@ import { supabase } from './lib/supabase';
 import { Device, Transfer, FileInfo } from './types';
 import { cn, formatBytes, generatePairingCode } from './lib/utils';
 import { io, Socket } from 'socket.io-client';
+import PWAInstallPopup from './components/PWAInstallPopup';
+
 
 // --- Sub-components (Drafted here for speed, will extract if too large) ---
 
@@ -41,9 +43,12 @@ function DeviceIcon({ type }: { type: 'mobile' | 'desktop' }) {
 
 export default function App() {
   return (
+     <>
+      <PWAInstallPopup />
     <SupabaseProvider>
       <Dashboard />
     </SupabaseProvider>
+    </>
   );
 }
 
