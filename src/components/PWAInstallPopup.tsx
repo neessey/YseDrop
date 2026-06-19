@@ -1,4 +1,4 @@
-import useInstallPWA from '../pwa/useinstallpwa';
+import useInstallPWA from '../pwa/useInstallPWA';
 
 export default function PWAInstallPopup() {
   const { canInstall, install } = useInstallPWA();
