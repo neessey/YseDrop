@@ -1,4 +1,0 @@
-User-agent: *
-Allow: /
-
-Sitemap: https://ysedrop.onrender.com/sitemap.xml
